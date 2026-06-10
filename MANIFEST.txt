@@ -1,0 +1,16 @@
+adr-writing/SKILL.md
+api-integration/SKILL.md
+ci-cd-gitlab/SKILL.md
+code-review/SKILL.md
+container-build/SKILL.md
+dependency-audit/SKILL.md
+docs-as-code/SKILL.md
+git-branching/SKILL.md
+git-commit-style/SKILL.md
+least-privilege/SKILL.md
+python-devops/SKILL.md
+refactor-safe/SKILL.md
+secret-hygiene/SKILL.md
+senior-code-style/SKILL.md
+shell-scripting/SKILL.md
+terraform-iac/SKILL.md
