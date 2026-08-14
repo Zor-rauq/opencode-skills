@@ -1,0 +1,11 @@
+Le fichier Excel joint contient deux feuilles :
+- "[nom feuille SSS]" : une ligne par SSS, avec colonnes [ex: Nom, Description, ...].
+- "[nom feuille Fonctions]" : colonne A = nom de la fonction de service (cellules fusionnées sur N lignes), colonne B = un SSS par ligne, listant les SSS qui composent cette fonction.
+
+Pour chaque fonction de service :
+1. Identifie les SSS qui lui sont associés (via les cellules fusionnées en colonne A).
+2. Récupère leurs descriptions dans la feuille SSS.
+3. Génère une description synthétique de la fonction de service (2-4 phrases), basée UNIQUEMENT sur les descriptions des SSS regroupés — n'invente rien qui ne soit pas dans le fichier.
+
+Style : homogène, technique, ton neutre.
+Sortie : tableau "Fonction de service | Description générée", ou directement dans une nouvelle colonne C du fichier Excel.
