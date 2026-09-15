@@ -14,10 +14,10 @@ reseau:
 
   # X du schema 10.29.X.YZ. A REMPLACER par vos vraies valeurs.
   subnets:
-    steeris: 10
-    akkodis: 11
-    ussps: 12
-    dronathlon: 13
+    main: 1
+    demo: 2
+    st: 3
+    to_remove: 4
 
 # Z du schema. L'ordre et les suffixes sont contractuels : ne pas reordonner.
 roles:
@@ -67,19 +67,19 @@ defauts:
 grappes:
   - numero: 1
     env: prod
-    subnet: steeris
+    subnet: main
     version_composant: "2.4.1"
     validation_manuelle: true # bloque le apply derriere un bouton
 
   - numero: 8
     env: preprod
-    subnet: steeris
+    subnet: main
     version_composant: "2.5.0-rc3"
     validation_manuelle: true
 
   - numero: 9
     env: dev
-    subnet: steeris
+    subnet: main
     version_composant: "main"
     validation_manuelle: false
     # surcharge possible role par role :
