@@ -1,0 +1,19 @@
+{
+  "name": "grappes-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generation de la pipeline enfant et du rapport d'etat a partir de grappes.yaml",
+  "bin": {
+    "grappes": "./grappes.mjs"
+  },
+  "scripts": {
+    "valider": "node grappes.mjs valider"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

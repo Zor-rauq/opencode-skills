@@ -1,0 +1,37 @@
+# =============================================================================
+# Modeles de jobs consommes par la pipeline enfant generee
+# (tools/grappes.mjs pipeline). Les valeurs GRAPPE_NUMERO / ENVIRONNEMENT sont
+# injectees par le generateur : rien n'est code en dur ici.
+# =============================================================================
+
+.tofu:
+  image: $TOFU_IMAGE
+  variables:
+    TF_VAR_grappe_numero: $GRAPPE_NUMERO
+  before_script:
+    - sh ci/backend.sh "$GRAPPE_NUMERO"
+
+.tofu:plan:
+  extends: .tofu
+  stage: plan
+  script:
+    - tofu -chdir=tofu plan -out=plan.tfplan
+    - tofu -chdir=tofu show -json plan.tfplan > plan.json
+  artifacts:
+    paths:
+      - tofu/plan.tfplan
+    reports:
+      # Affiche le resume du plan directement dans la MR.
+      terraform: tofu/plan.json
+    expire_in: 1 week
+
+.tofu:apply:
+  extends: .tofu
+  stage: apply
+  script:
+    # On applique le plan valide a l'etape precedente, pas un nouveau calcul :
+    # ce qui est relu dans la MR est exactement ce qui part en production.
+    - tofu -chdir=tofu apply -auto-approve plan.tfplan
+  resource_group: $ENVIRONNEMENT # jamais deux apply concurrents sur une grappe
+  # Les `rules` (branche par defaut, validation manuelle ou non) sont posees par
+  # le generateur, d'apres `validation_manuelle` dans grappes.yaml.
