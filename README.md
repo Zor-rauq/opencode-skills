@@ -1,4 +1,4 @@
-# Parc de VM IAAS seanergy
+# Parc de VM IAAS
 
 Deploiement des grappes de VM avec OpenTofu, et rapport d'etat genere
 automatiquement a chaque pipeline.
