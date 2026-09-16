@@ -1,0 +1,711 @@
+diff -ru before/README.md toolbox/README.md
+--- before/README.md	2026-09-16 04:59:56.237732425 +0000
++++ toolbox/README.md	2026-09-15 15:16:24.454869787 +0000
+@@ -53,24 +53,44 @@
+ 
+ ### `deploy.yaml`, versionne dans le depot du composant
+ 
++Deux natures d'artefact, donc deux formes de descripteur.
++
++**Type image** : le build ne produit aucun fichier, il laisse une image dans le
++stockage podman local. C'est la toolbox qui realise le `podman save`.
++`artifact.path` ne s'applique pas et est refuse.
++
+ ```yaml
+ component: mon-service
+-type: quarkus-image          # ear-war | quarkus-zip | quarkus-image
++type: quarkus-image
+ 
+ build:
+   script: ./build.sh         # defaut
+-  env:
+-    MAVEN_OPTS: -Xmx2g
+ 
+-artifact:
+-  path: target/*-image.tar   # motif glob, doit correspondre a un seul fichier
+-  manifest: .toolbox/artifact.json   # optionnel, prime sur path s'il existe
++image:
++  ref: mon-service:latest    # reference laissee par le build en local
++  podman_bin: podman         # podman du poste, distinct de celui de la VM
++  compress: true             # defaut, compresse l'archive pendant le save
+ 
+ # Facultatifs, deduits sinon
+ service: mon-service         # deduit du compose distant
+ version: ""                  # deduite de git describe
+-image:
+-  source_ref: ""             # etiquette portee par l'image dans l'archive
++```
++
++**Types fichier** (`ear-war`, `quarkus-zip`) : le build depose un fichier sur
++disque, la toolbox le localise.
++
++```yaml
++component: mon-service
++type: quarkus-zip
++
++build:
++  script: ./build.sh
++  env:
++    MAVEN_OPTS: -Xmx2g
++
++artifact:
++  path: target/*.zip         # motif glob, doit correspondre a un seul fichier
++  manifest: .toolbox/artifact.json   # optionnel, prime sur path s'il existe
+ ```
+ 
+ ### `~/.config/toolbox/targets.yaml`, hors depot
+@@ -111,7 +131,7 @@
+ 
+ Cascade de resolution, du plus fort au plus faible :
+ flag CLI, variable d'environnement (`TOOLBOX_COMPONENT`, `TOOLBOX_TYPE`,
+-`TOOLBOX_SERVICE`, `TOOLBOX_VERSION`, `TOOLBOX_ARTIFACT_PATH`, `TOOLBOX_USER`,
++`TOOLBOX_SERVICE`, `TOOLBOX_VERSION`, `TOOLBOX_ARTIFACT_PATH`, `TOOLBOX_IMAGE_REF`, `TOOLBOX_USER`,
+ `TOOLBOX_TARGET`, `TOOLBOX_TARGETS`), descripteur, deduction, puis echec
+ explicite. Jamais de repli silencieux.
+ 
+@@ -143,9 +163,15 @@
+ version, ce qui permet de savoir ce qui tourne reellement meme apres plusieurs
+ deploiements.
+ 
+-**Transfert ignore si inutile.** L'empreinte de la derniere archive chargee est
+-memorisee dans `$HOME/.toolbox/<composant>.image.sha256` sur la VM. Si l'archive
+-locale est identique, les centaines de mega-octets ne repartent pas.
++**Transfert ignore si inutile.** L'identifiant d'une image est conserve par
++`podman save` puis `podman load`. Comparer l'identifiant local a celui porte par
++l'etiquette sur la VM dit donc exactement si le transfert est necessaire, sans
++aucun fichier temoin a maintenir. Le `podman save` lui-meme n'est declenche
++qu'apres cette comparaison : rien n'est produit inutilement.
++
++L'archive est compressee pendant le save, en une seule passe qui calcule aussi
++son empreinte. Le transport SSH ne compressant pas, le gain sur une image
++Quarkus est substantiel.
+ 
+ ## Ajouter un type d'artefact
+ 
+@@ -159,7 +185,5 @@
+ 1. La commande `podman-compose` gere la sequence `stop` / `rm -f` / `up -d`
+    restreinte a un service. Un `down` restreint a un service n'est pas fiable
+    d'une version a l'autre, d'ou ce choix.
+-2. Le format de sortie de `podman load`. Si la reference n'est pas reconnue, le
+-   message d'erreur le dit et `image.source_ref` permet de la declarer.
+-3. Le libelle exact du label utilise par `podman-compose` pour `status`
++2. Le libelle exact du label utilise par `podman-compose` pour `status`
+    (`io.podman.compose.service`), qui peut varier selon la version.
+diff -ru before/cmd/toolbox/main.go toolbox/cmd/toolbox/main.go
+--- before/cmd/toolbox/main.go	2026-09-16 04:59:41.834961882 +0000
++++ toolbox/cmd/toolbox/main.go	2026-09-15 15:16:04.424812418 +0000
+@@ -33,7 +33,7 @@
+   --verbose      sortie detaillee
+ 
+ Surcharges (priorite: flag > variable d'environnement > descripteur):
+-  --component, --type, --service, --version, --artifact, --user
++  --component, --type, --service, --version, --artifact, --image-ref, --user
+ 
+ Options de deploy:
+   --no-build     ne lance pas le script de build, l'artefact existe deja
+@@ -84,6 +84,7 @@
+ 	fs.StringVar(&o.ov.Service, "service", "", "surcharge du service compose")
+ 	fs.StringVar(&o.ov.Version, "version", "", "surcharge de la version")
+ 	fs.StringVar(&o.ov.Artifact, "artifact", "", "surcharge du chemin d'artefact")
++	fs.StringVar(&o.ov.ImageRef, "image-ref", "", "surcharge de la reference de l'image locale")
+ 	fs.StringVar(&o.ov.User, "user", "", "surcharge de l'utilisateur SSH")
+ 	if cmd == "deploy" {
+ 		fs.BoolVar(&o.noBuild, "no-build", false, "ne pas lancer le script de build")
+@@ -124,6 +125,9 @@
+ 		if err != nil {
+ 			return err
+ 		}
++		// L'archive d'image eventuellement produite pendant le plan est locale
++		// et temporaire : elle disparait a la sortie, reussie ou non.
++		defer art.Cleanup()
+ 	}
+ 
+ 	client, err := ssh.Dial(ssh.Options{
+diff -ru before/internal/artifact/artifact.go toolbox/internal/artifact/artifact.go
+--- before/internal/artifact/artifact.go	2026-09-16 04:58:46.327538478 +0000
++++ toolbox/internal/artifact/artifact.go	2026-09-15 15:14:58.866525563 +0000
+@@ -1,14 +1,21 @@
+-// Package artifact declenche le build local et localise l'artefact produit.
++// Package artifact declenche le build local et determine ce qui sera transfere.
+ //
+ // Le build est entierement delegue au script du projet : la toolbox reste
+ // agnostique du systeme de construction, ce qui lui permet de servir tous les
+ // archetypes sans modification.
+ //
+-// La localisation de l'artefact suit la cascade : manifeste emis par le script
+-// s'il existe, sinon motif declare dans deploy.yaml, sinon echec explicite.
++// Deux natures d'artefact coexistent :
++//
++//   - fichier (ear-war, quarkus-zip) : le build depose un fichier sur disque.
++//     La localisation suit la cascade manifeste, puis motif declare, puis echec.
++//
++//   - image (quarkus-image) : le build ne depose rien, il laisse une image dans
++//     le stockage podman local. C'est la toolbox qui realise le podman save,
++//     et seulement si le transfert s'avere necessaire.
+ package artifact
+ 
+ import (
++	"compress/gzip"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"encoding/json"
+@@ -23,16 +30,29 @@
+ 	"toolbox/internal/ui"
+ )
+ 
+-// Artifact decrit le fichier a deposer sur la VM.
++// Artifact decrit ce qui sera depose sur la VM.
+ type Artifact struct {
+-	Path    string
+ 	Name    string
+ 	Version string
+-	SHA256  string
++
++	// Path est le fichier local a transferer. Pour une image, il reste vide
++	// jusqu'a l'appel de Save.
++	Path string
++	// SHA256 est l'empreinte de Path, renseignee en meme temps que lui.
++	SHA256 string
++
++	// ImageRef et ImageID ne concernent que le type image. ImageID est
++	// l'identifiant de l'image dans le stockage local ; il est conserve par
++	// podman save puis podman load, ce qui en fait la reference fiable de bout
++	// en bout.
++	ImageRef string
++	ImageID  string
++
++	tempDir string
+ }
+ 
+ // Manifest est le contrat optionnel qu'un script de build peut emettre pour
+-// lever une ambiguite. Quand il est present, il prime sur le motif declare.
++// lever une ambiguite sur l'emplacement d'un artefact fichier.
+ type Manifest struct {
+ 	Path    string `json:"path"`
+ 	Version string `json:"version"`
+@@ -65,13 +85,112 @@
+ 	return nil
+ }
+ 
+-// Resolve localise l'artefact et calcule son empreinte.
++// Resolve identifie l'artefact produit, selon sa nature.
+ func Resolve(c *config.Component, log *ui.Logger) (*Artifact, error) {
+ 	a := &Artifact{Name: c.Name, Version: c.Version}
++	if a.Version == "" {
++		a.Version = detectVersion(c.Dir())
++	}
++	if a.Version == "" {
++		return nil, fmt.Errorf(
++			"version indeterminable : renseignez 'version' dans deploy.yaml, " +
++				"passez --version, ou emettez-la dans le manifeste")
++	}
++
++	if c.Type == config.TypeQuarkusImage {
++		return a, a.resolveImage(c, log)
++	}
++	return a, a.resolveFile(c, log)
++}
++
++// resolveImage verifie que l'image attendue existe dans le stockage local et
++// releve son identifiant. Aucune archive n'est produite a ce stade : le save
++// est differe, car il peut s'averer inutile.
++func (a *Artifact) resolveImage(c *config.Component, log *ui.Logger) error {
++	a.ImageRef = c.Image.Ref
++
++	id, err := run(c.Dir(), c.Image.PodmanBin, "image", "inspect", "--format", "{{.Id}}", a.ImageRef)
++	if err != nil {
++		return fmt.Errorf(
++			"image %q absente du stockage podman local : le build l'a-t-il bien produite ? "+
++				"Verifiez avec '%s images'", a.ImageRef, c.Image.PodmanBin)
++	}
++	a.ImageID = strings.TrimSpace(id)
++
++	log.Info("image locale : %s (%s, version %s)", a.ImageRef, short(a.ImageID), a.Version)
++	return nil
++}
++
++// Save produit l'archive de l'image et calcule son empreinte en une seule
++// passe. Appele depuis une etape du plan, donc seulement si le transfert est
++// necessaire.
++func (a *Artifact) Save(c *config.Component, log *ui.Logger) error {
++	dir, err := os.MkdirTemp("", "toolbox-")
++	if err != nil {
++		return err
++	}
++	a.tempDir = dir
++
++	name := fmt.Sprintf("%s-%s.tar", a.Name, sanitize(a.Version))
++	compress := c.Image.Compression()
++	if compress {
++		name += ".gz"
++	}
++	out := filepath.Join(dir, name)
++
++	f, err := os.Create(out)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++
++	// L'empreinte est calculee sur le flux ecrit, ce qui evite une relecture
++	// complete de l'archive.
++	h := sha256.New()
++	w := io.MultiWriter(f, h)
+ 
+-	if m, err := readManifest(c); err != nil {
+-		return nil, err
+-	} else if m != nil {
++	cmd := exec.Command(c.Image.PodmanBin, "save", a.ImageRef)
++	cmd.Stderr = os.Stderr
++
++	if compress {
++		gz := gzip.NewWriter(w)
++		cmd.Stdout = gz
++		if err := cmd.Run(); err != nil {
++			return fmt.Errorf("podman save a echoue : %w", err)
++		}
++		if err := gz.Close(); err != nil {
++			return err
++		}
++	} else {
++		cmd.Stdout = w
++		if err := cmd.Run(); err != nil {
++			return fmt.Errorf("podman save a echoue : %w", err)
++		}
++	}
++
++	a.Path = out
++	a.SHA256 = hex.EncodeToString(h.Sum(nil))
++
++	if fi, err := os.Stat(out); err == nil {
++		log.Info("archive : %s (%s)", filepath.Base(out), humanSize(fi.Size()))
++	}
++	return nil
++}
++
++// Cleanup supprime l'archive temporaire produite par Save.
++func (a *Artifact) Cleanup() {
++	if a != nil && a.tempDir != "" {
++		os.RemoveAll(a.tempDir)
++	}
++}
++
++// resolveFile localise un artefact fichier et calcule son empreinte.
++func (a *Artifact) resolveFile(c *config.Component, log *ui.Logger) error {
++	m, err := readManifest(c)
++	if err != nil {
++		return err
++	}
++	if m != nil {
+ 		log.Debug("manifeste trouve, il prime sur artifact.path")
+ 		a.Path = absFrom(c.Dir(), m.Path)
+ 		if m.Version != "" {
+@@ -83,36 +202,27 @@
+ 	} else {
+ 		p, err := resolveGlob(c)
+ 		if err != nil {
+-			return nil, err
++			return err
+ 		}
+ 		a.Path = p
+ 	}
+ 
+ 	fi, err := os.Stat(a.Path)
+ 	if err != nil {
+-		return nil, fmt.Errorf("artefact introuvable (%s) : %w", a.Path, err)
++		return fmt.Errorf("artefact introuvable (%s) : %w", a.Path, err)
+ 	}
+ 	if fi.IsDir() {
+-		return nil, fmt.Errorf("artefact attendu sous forme de fichier, %s est un repertoire", a.Path)
+-	}
+-
+-	if a.Version == "" {
+-		a.Version = detectVersion(c.Dir())
+-	}
+-	if a.Version == "" {
+-		return nil, fmt.Errorf(
+-			"version indeterminable : renseignez 'version' dans deploy.yaml, " +
+-				"passez --version, ou emettez-la dans le manifeste")
++		return fmt.Errorf("artefact attendu sous forme de fichier, %s est un repertoire", a.Path)
+ 	}
+ 
+ 	sum, err := sha256File(a.Path)
+ 	if err != nil {
+-		return nil, err
++		return err
+ 	}
+ 	a.SHA256 = sum
+ 
+ 	log.Info("artefact : %s (%s, %s)", filepath.Base(a.Path), a.Version, humanSize(fi.Size()))
+-	return a, nil
++	return nil
+ }
+ 
+ func readManifest(c *config.Component) (*Manifest, error) {
+@@ -158,10 +268,10 @@
+ // detectVersion lit la version depuis Git, sans imposer de systeme de build.
+ func detectVersion(dir string) string {
+ 	if out, err := run(dir, "git", "describe", "--tags", "--always", "--dirty"); err == nil {
+-		return out
++		return strings.TrimSpace(out)
+ 	}
+ 	if out, err := run(dir, "git", "rev-parse", "--short", "HEAD"); err == nil {
+-		return out
++		return strings.TrimSpace(out)
+ 	}
+ 	return ""
+ }
+@@ -204,6 +314,20 @@
+ 	return out
+ }
+ 
++// sanitize rend une version utilisable dans un nom de fichier ou une etiquette.
++func sanitize(v string) string {
++	r := strings.NewReplacer("/", "-", ":", "-", " ", "-", "+", "-")
++	return strings.Trim(r.Replace(v), "-.")
++}
++
++func short(id string) string {
++	id = strings.TrimPrefix(id, "sha256:")
++	if len(id) > 12 {
++		return id[:12]
++	}
++	return id
++}
++
+ func humanSize(n int64) string {
+ 	const unit = 1024
+ 	if n < unit {
+diff -ru before/internal/config/config.go toolbox/internal/config/config.go
+--- before/internal/config/config.go	2026-09-16 04:58:25.863537261 +0000
++++ toolbox/internal/config/config.go	2026-09-15 15:14:16.617937694 +0000
+@@ -47,12 +47,26 @@
+ }
+ 
+ // ImageSpec porte les reglages propres au type quarkus-image.
++//
++// Pour ce type, le script de build ne produit aucun fichier : il laisse une
++// image dans le stockage podman local. C'est donc la toolbox qui realise le
++// podman save, et 'artifact.path' ne s'applique pas.
+ type ImageSpec struct {
+-	// SourceRef est la reference portee par l'image a l'interieur de l'archive
+-	// produite par podman save. Vide, elle est lue dans la sortie de podman load,
+-	// dont le format varie selon les versions. La declarer supprime cette
+-	// dependance.
+-	SourceRef string `yaml:"source_ref"`
++	// Ref est la reference de l'image laissee par le build dans le stockage local.
++	Ref string `yaml:"ref"`
++	// PodmanBin est le podman du poste de developpement, distinct de celui de la VM.
++	PodmanBin string `yaml:"podman_bin"`
++	// Compress compresse l'archive pendant le save. Actif par defaut : le
++	// transport SSH ne compresse pas, et une archive d'image se reduit fortement.
++	Compress *bool `yaml:"compress"`
++}
++
++// Compression indique si l'archive doit etre compressee.
++func (i ImageSpec) Compression() bool {
++	if i.Compress == nil {
++		return true
++	}
++	return *i.Compress
+ }
+ 
+ // Component est le descripteur versionne dans le depot du projet (deploy.yaml).
+@@ -123,6 +137,7 @@
+ 	Service   string
+ 	Version   string
+ 	Artifact  string
++	ImageRef  string
+ 	User      string
+ }
+ 
+@@ -148,6 +163,7 @@
+ 	applyEnv(&c.Service, "TOOLBOX_SERVICE")
+ 	applyEnv(&c.Version, "TOOLBOX_VERSION")
+ 	applyEnv(&c.Artifact.Path, "TOOLBOX_ARTIFACT_PATH")
++	applyEnv(&c.Image.Ref, "TOOLBOX_IMAGE_REF")
+ 
+ 	applyFlag(&c.Name, ov.Component)
+ 	if ov.Type != "" {
+@@ -156,6 +172,7 @@
+ 	applyFlag(&c.Service, ov.Service)
+ 	applyFlag(&c.Version, ov.Version)
+ 	applyFlag(&c.Artifact.Path, ov.Artifact)
++	applyFlag(&c.Image.Ref, ov.ImageRef)
+ 
+ 	if c.Build.Script == "" {
+ 		c.Build.Script = "./build.sh"
+@@ -163,6 +180,9 @@
+ 	if c.Artifact.Manifest == "" {
+ 		c.Artifact.Manifest = ".toolbox/artifact.json"
+ 	}
++	if c.Image.PodmanBin == "" {
++		c.Image.PodmanBin = "podman"
++	}
+ 
+ 	if err := c.validate(); err != nil {
+ 		return nil, err
+@@ -182,6 +202,22 @@
+ 	default:
+ 		return fmt.Errorf("type d'artefact inconnu : %q", c.Type)
+ 	}
++	// Ce que la toolbox exige depend de la nature de l'artefact : une image vit
++	// dans le stockage podman local, les autres types sont des fichiers.
++	if c.Type == TypeQuarkusImage {
++		if c.Image.Ref == "" {
++			return fmt.Errorf(
++				"champ 'image.ref' manquant : pour une image, la toolbox a besoin de " +
++					"la reference laissee par le build dans le stockage podman local " +
++					"(ou passez --image-ref)")
++		}
++		if c.Artifact.Path != "" {
++			return fmt.Errorf(
++				"'artifact.path' ne s'applique pas au type %s : le build ne produit pas "+
++					"de fichier, c'est la toolbox qui realise le podman save", TypeQuarkusImage)
++		}
++		return nil
++	}
+ 	if c.Artifact.Path == "" {
+ 		return fmt.Errorf("champ 'artifact.path' manquant : la toolbox ne devine pas l'emplacement de l'artefact")
+ 	}
+Only in toolbox/internal/deploy: deployer.go
+diff -ru before/internal/deploy/pipeline.go toolbox/internal/deploy/pipeline.go
+--- before/internal/deploy/pipeline.go	2026-09-16 04:59:06.967539704 +0000
++++ toolbox/internal/deploy/pipeline.go	2026-09-15 15:15:11.603544075 +0000
+@@ -35,16 +35,25 @@
+ }
+ 
+ // StepUpload transfere un fichier local vers la VM.
+-func StepUpload(ctx *Context, local, remote string) Step {
++//
++// Le chemin est passe par pointeur : pour une image, l'archive n'existe pas
++// encore au moment de la construction du plan, elle est produite par une etape
++// anterieure.
++func StepUpload(ctx *Context, local *string, remote string) Step {
+ 	return Step{
+-		Desc: fmt.Sprintf("Transferer %s vers %s", path.Base(local), remote),
+-		Run:  func() error { return ctx.SSH.Upload(local, remote) },
++		Desc: fmt.Sprintf("Transferer l'archive vers %s", remote),
++		Run: func() error {
++			if *local == "" {
++				return fmt.Errorf("aucun fichier local a transferer")
++			}
++			return ctx.SSH.Upload(*local, remote)
++		},
+ 	}
+ }
+ 
+ // StepVerifyChecksum recalcule l'empreinte cote VM et la compare.
+ // Un transfert tronque est ainsi detecte avant toute action destructrice.
+-func StepVerifyChecksum(ctx *Context, remote, want string) Step {
++func StepVerifyChecksum(ctx *Context, remote string, want *string) Step {
+ 	return Step{
+ 		Desc: "Verifier l'empreinte du fichier transfere",
+ 		Run: func() error {
+@@ -56,8 +65,8 @@
+ 			if len(got) == 0 {
+ 				return fmt.Errorf("sha256sum n'a rien renvoye pour %s", remote)
+ 			}
+-			if got[0] != want {
+-				return fmt.Errorf("empreinte differente apres transfert (attendu %s, obtenu %s)", want, got[0])
++			if got[0] != *want {
++				return fmt.Errorf("empreinte differente apres transfert (attendu %s, obtenu %s)", *want, got[0])
+ 			}
+ 			return nil
+ 		},
+diff -ru before/internal/deploy/quarkusimage.go toolbox/internal/deploy/quarkusimage.go
+--- before/internal/deploy/quarkusimage.go	2026-09-16 04:59:34.091541317 +0000
++++ toolbox/internal/deploy/quarkusimage.go	2026-09-15 15:15:57.841307956 +0000
+@@ -2,7 +2,6 @@
+ 
+ import (
+ 	"fmt"
+-	"regexp"
+ 	"strings"
+ 
+ 	"toolbox/internal/compose"
+@@ -12,8 +11,9 @@
+ 
+ func init() { register(&quarkusImage{}) }
+ 
+-// quarkusImage deploie une image construite localement, transferee sous forme
+-// d'archive podman save puis chargee sur la VM.
++// quarkusImage deploie une image laissee par le build dans le stockage podman
++// local. Le script de build ne produit pas de fichier : la toolbox realise
++// elle-meme le podman save, et seulement si le transfert est necessaire.
+ //
+ // Le compose n'est jamais modifie : l'image chargee recoit l'etiquette que le
+ // compose attend deja. L'image precedente est etiquetee ":previous" avant le
+@@ -40,22 +40,40 @@
+ 	versionRef := repo + ":" + sanitizeTag(ctx.Artifact.Version)
+ 	prevRef := repo + ":" + previousTag
+ 
+-	// Lecture seule : etat courant de la VM.
+-	currentID := imageID(ctx, target)
+-	marker := MarkerPath(ctx.Comp.Name, "image")
+-	alreadyDeployed := ReadMarker(ctx, marker) == ctx.Artifact.SHA256 && currentID != ""
++	// L'identifiant d'image est conserve par podman save puis podman load.
++	// Comparer l'identifiant local a celui porte par l'etiquette sur la VM dit
++	// donc exactement si le transfert est necessaire, sans fichier temoin.
++	localID := ctx.Artifact.ImageID
++	remoteID := imageID(ctx, target)
+ 
+-	remoteArchive := StagingPath(fmt.Sprintf("%s-%s.tar", ctx.Comp.Name, sanitizeTag(ctx.Artifact.Version)))
++	if remoteID != "" && remoteID == localID {
++		ctx.Log.Info("la VM porte deja cette image (%s), transfert inutile", short(localID))
++		return []Step{StepRecreateService(ctx)}, nil
++	}
+ 
+-	var steps []Step
++	ext := ".tar"
++	if ctx.Comp.Image.Compression() {
++		ext += ".gz"
++	}
++	remoteArchive := StagingPath(fmt.Sprintf("%s-%s%s",
++		ctx.Comp.Name, sanitizeTag(ctx.Artifact.Version), ext))
+ 
+-	if currentID != "" {
+-		ctx.Log.Info("image en place : %s (%s)", target, short(currentID))
++	steps := []Step{
++		{
++			Desc: fmt.Sprintf("Produire l'archive de %s (podman save)", ctx.Artifact.ImageRef),
++			Run:  func() error { return ctx.Artifact.Save(ctx.Comp, ctx.Log) },
++		},
++		StepUpload(ctx, &ctx.Artifact.Path, remoteArchive),
++		StepVerifyChecksum(ctx, remoteArchive, &ctx.Artifact.SHA256),
++	}
++
++	if remoteID != "" {
++		ctx.Log.Info("image en place : %s (%s)", target, short(remoteID))
+ 		steps = append(steps, Step{
+ 			Desc: fmt.Sprintf("Marquer l'image en place comme point de retour (%s)", prevRef),
+ 			Run: func() error {
+ 				_, err := ctx.SSH.Run(fmt.Sprintf("%s tag %s %s",
+-					podman, ssh.Quote(currentID), ssh.Quote(prevRef)))
++					podman, ssh.Quote(remoteID), ssh.Quote(prevRef)))
+ 				return err
+ 			},
+ 		})
+@@ -63,58 +81,33 @@
+ 		ctx.Log.Warn("aucune image ne porte %s : ce deploiement n'aura pas de point de retour", target)
+ 	}
+ 
+-	if alreadyDeployed {
+-		// L'archive locale est deja celle chargee sur la VM : inutile de
+-		// retransferer plusieurs centaines de mega-octets.
+-		ctx.Log.Info("archive identique a celle deja chargee, transfert ignore")
+-	} else {
+-		// loadedRef est renseigne par l'etape de chargement et consomme par
+-		// l'etape d'etiquetage.
+-		loadedRef := ctx.Comp.Image.SourceRef
+-
+-		steps = append(steps,
+-			StepUpload(ctx, ctx.Artifact.Path, remoteArchive),
+-			StepVerifyChecksum(ctx, remoteArchive, ctx.Artifact.SHA256),
+-			Step{
+-				Desc: "Charger l'image sur la VM",
+-				Run: func() error {
+-					out, err := ctx.SSH.Run(fmt.Sprintf("%s load -i %s",
+-						podman, ssh.Quote(ctx.SSH.Expand(remoteArchive))))
+-					if err != nil {
+-						return err
+-					}
+-					if loadedRef != "" {
+-						return nil
+-					}
+-					ref, err := parseLoadedRef(out)
+-					if err != nil {
+-						return err
+-					}
+-					loadedRef = ref
+-					return nil
+-				},
++	steps = append(steps,
++		Step{
++			Desc: "Charger l'image sur la VM",
++			Run: func() error {
++				_, err := ctx.SSH.Run(fmt.Sprintf("%s load -i %s",
++					podman, ssh.Quote(ctx.SSH.Expand(remoteArchive))))
++				return err
+ 			},
+-			Step{
+-				Desc: fmt.Sprintf("Etiqueter l'image en %s et %s", target, versionRef),
+-				Run: func() error {
+-					if loadedRef == "" {
+-						return fmt.Errorf("reference de l'image chargee inconnue")
+-					}
+-					for _, ref := range []string{target, versionRef} {
+-						if _, err := ctx.SSH.Run(fmt.Sprintf("%s tag %s %s",
+-							podman, ssh.Quote(loadedRef), ssh.Quote(ref))); err != nil {
+-							return err
+-						}
++		},
++		Step{
++			Desc: fmt.Sprintf("Etiqueter l'image en %s et %s", target, versionRef),
++			Run: func() error {
++				if imageID(ctx, localID) == "" {
++					return fmt.Errorf(
++						"l'image %s est absente apres le chargement ; "+
++							"verifiez la sortie de podman load", short(localID))
++				}
++				for _, ref := range []string{target, versionRef} {
++					if _, err := ctx.SSH.Run(fmt.Sprintf("%s tag %s %s",
++						podman, ssh.Quote(localID), ssh.Quote(ref))); err != nil {
++						return err
+ 					}
+-					return nil
+-				},
++				}
++				return nil
+ 			},
+-		)
+-	}
+-
+-	steps = append(steps,
++		},
+ 		StepRecreateService(ctx),
+-		StepWriteMarker(ctx, marker, ctx.Artifact.SHA256),
+ 		Step{
+ 			Desc: "Purger les images sans etiquette",
+ 			Run: func() error {
+@@ -124,10 +117,8 @@
+ 				return nil
+ 			},
+ 		},
++		StepRemoveRemote(ctx, remoteArchive),
+ 	)
+-	if !alreadyDeployed {
+-		steps = append(steps, StepRemoveRemote(ctx, remoteArchive))
+-	}
+ 	return steps, nil
+ }
+ 
+@@ -161,7 +152,6 @@
+ 			},
+ 		},
+ 		StepRecreateService(ctx),
+-		StepClearMarker(ctx, MarkerPath(ctx.Comp.Name, "image")),
+ 	}, nil
+ }
+ 
+@@ -211,20 +201,6 @@
+ 	return strings.TrimSpace(out)
+ }
+ 
+-// loadedRefRe couvre les formulations de podman load rencontrees selon les versions.
+-var loadedRefRe = regexp.MustCompile(`(?i)Loaded image(?:\(s\))?:\s*(\S+)`)
+-
+-func parseLoadedRef(out string) (string, error) {
+-	m := loadedRefRe.FindStringSubmatch(out)
+-	if len(m) < 2 {
+-		return "", fmt.Errorf(
+-			"impossible de lire la reference chargee dans la sortie de podman load. "+
+-				"Declarez 'image.source_ref' dans deploy.yaml. Sortie obtenue : %s",
+-			strings.TrimSpace(out))
+-	}
+-	return strings.TrimSuffix(strings.Split(m[1], ",")[0], ","), nil
+-}
+-
+ // sanitizeTag rend une version utilisable comme etiquette d'image.
+ func sanitizeTag(v string) string {
+ 	r := strings.NewReplacer("/", "-", ":", "-", " ", "-", "+", "-")
