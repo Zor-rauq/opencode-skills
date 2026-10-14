@@ -1,0 +1,116 @@
+{
+  "_lisez_moi": "Vues d'export de gitlab_export_pi.py. Chaque vue produit vue_<nom>.csv. Filtres combinés en ET ; dans une liste, une seule valeur suffit. Colonnes : voir README.md ; cf:<Nom> pour un champ personnalisé.",
+
+  "classification": [
+    {"label": "niveau::fonction-service", "niveau": "Fonction de service"},
+    {"label": "niveau::feature", "niveau": "Feature"},
+    {"type": "Epic", "niveau": "Épic non classé"},
+    {"type": "User Story", "niveau": "User Story"},
+    {"type": "Enabler", "niveau": "Enabler"},
+    {"type": "Spike", "niveau": "Spike"},
+    {"type": "Task", "niveau": "Tâche"},
+    {"type": "Objectif PI", "niveau": "Objectif PI"},
+    {"type": "Risque", "niveau": "Risque"}
+  ],
+  "niveau_fs": "Fonction de service",
+  "niveau_feature": "Feature",
+  "rollup_niveaux": ["User Story", "Enabler", "Spike"],
+  "statuts_annules": ["Abandonné", "Abandonnée", "Doublon", "Won't do", "Duplicate"],
+
+  "wsjf": {
+    "valeur_metier": "Valeur métier",
+    "criticite_temporelle": "Criticité temporelle",
+    "reduction_risque": "Réduction risque / opportunité",
+    "taille": "Taille"
+  },
+
+  "objectifs": {
+    "niveau": "Objectif PI",
+    "vm_planifiee": "VM planifiée",
+    "vm_realisee": "VM réalisée",
+    "engagement": "Engagement",
+    "valeur_engage": "Engagé"
+  },
+
+  "vues": [
+    {
+      "nom": "pi1_features",
+      "description": "Features du PI 1 : priorité WSJF et avancement par leurs stories",
+      "filtre": {"niveau": ["Feature"], "jalon": ["PI-1"]},
+      "colonnes": ["ref", "titre", "fs", "statut", "etat", "jalon",
+                   "cf:Nature", "cf:Périmètre", "cf:Programmes", "wsjf",
+                   "desc_total", "desc_termines", "desc_poids_total",
+                   "desc_poids_termines", "desc_sans_poids", "avancement_pct",
+                   "sante", "bloque"],
+      "tri": ["fs", "-wsjf"]
+    },
+    {
+      "nom": "fs_couverture",
+      "description": "Fonctions de service : chaînes servies et avancement des stories rattachées",
+      "filtre": {"niveau": ["Fonction de service"]},
+      "colonnes": ["ref", "cf:Réf. exigence", "titre", "cf:Chaînes fonctionnelles",
+                   "etat", "statut", "desc_total", "desc_termines",
+                   "desc_poids_total", "desc_poids_termines", "avancement_pct"],
+      "tri": ["cf:Réf. exigence", "ref"]
+    },
+    {
+      "nom": "pi1_backlog_equipes",
+      "description": "Stories, enablers et spikes du PI 1, par équipe et par sprint",
+      "filtre": {"niveau": ["User Story", "Enabler", "Spike"], "jalon": ["PI-1"]},
+      "colonnes": ["espace", "iteration", "ref", "niveau", "titre", "statut",
+                   "etat", "poids", "feature", "fs", "cf:Périmètre",
+                   "cf:Programmes", "assignes", "bloque", "bloque_par"],
+      "tri": ["espace", "iteration_debut", "ref"]
+    },
+    {
+      "nom": "pi1_spikes_enablers",
+      "description": "Spikes et enablers du PI 1",
+      "filtre": {"niveau": ["Enabler", "Spike"], "jalon": ["PI-1"]},
+      "colonnes": ["espace", "iteration", "ref", "niveau", "titre", "statut",
+                   "etat", "cf:Catégorie enabler", "cf:Timebox (jours)",
+                   "poids", "feature"],
+      "tri": ["niveau", "espace", "ref"]
+    },
+    {
+      "nom": "sprint_courant",
+      "description": "Tout ce qui est planifié dans le sprint en cours",
+      "filtre": {"iteration": ["courante"],
+                 "niveau": ["User Story", "Enabler", "Spike", "Tâche"]},
+      "colonnes": ["espace", "ref", "niveau", "titre", "statut", "etat",
+                   "poids", "feature", "assignes", "bloque"],
+      "tri": ["espace", "niveau", "ref"]
+    },
+    {
+      "nom": "bloquants_ouverts",
+      "description": "Éléments ouverts bloqués par un autre élément ouvert",
+      "filtre": {"bloque": true, "etat": "ouvert"},
+      "colonnes": ["ref", "niveau", "titre", "espace", "iteration",
+                   "bloque_par", "statut", "feature"],
+      "tri": ["iteration_debut", "ref"]
+    },
+    {
+      "nom": "pi1_objectifs",
+      "description": "Objectifs PI 1 par équipe : engagement et valeur métier",
+      "filtre": {"niveau": ["Objectif PI"], "jalon": ["PI-1"]},
+      "colonnes": ["espace", "ref", "titre", "cf:Engagement", "cf:VM planifiée",
+                   "cf:VM réalisée", "statut", "etat"],
+      "tri": ["espace", "ref"]
+    },
+    {
+      "nom": "risques_roam",
+      "description": "Risques et statut ROAM",
+      "filtre": {"niveau": ["Risque"], "etat": "tous"},
+      "colonnes": ["ref", "titre", "statut", "etat", "cf:Impact", "jalon",
+                   "assignes", "maj_le"],
+      "tri": ["statut", "ref"]
+    },
+    {
+      "nom": "programme_a_pi1",
+      "description": "Exemple de vue par variante : ce qui concerne le Programme A au PI 1",
+      "filtre": {"jalon": ["PI-1"], "champs": {"Programmes": ["Programme A"]}},
+      "colonnes": ["niveau", "ref", "titre", "statut", "etat", "cf:Périmètre",
+                   "cf:Programmes", "fs", "feature", "avancement_pct"],
+      "tri": ["niveau", "ref"]
+    }
+  ]
+}
